@@ -149,8 +149,8 @@ func TestOptionsAreChecked(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	client, err := converterstudio.NewClient(nil, converterstudio.WithBaseURL(" http://localhost:4391/api/ "))
-	if err != nil || client.BaseURL() != "http://localhost:4391/api" {
+	client, err := converterstudio.NewClient(nil, converterstudio.WithBaseURL(" http://localhost:8080/api/ "))
+	if err != nil || client.BaseURL() != "http://localhost:8080/api" {
 		t.Fatalf("%v %v", client, err)
 	}
 	if ua := converterstudio.UserAgent(); !strings.HasPrefix(ua, "converter-studio-go/"+converterstudio.Version+" (go") {

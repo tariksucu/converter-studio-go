@@ -3,8 +3,10 @@ package converterstudio_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	converterstudio "github.com/tariksucu/converter-studio-go"
@@ -157,18 +159,80 @@ func TestPausesGrowWhileAnswersComeBackEarly(t *testing.T) {
 	}
 }
 
+// The tests of the long polls' timing run in a synctest bubble, against the fake API in the
+// same goroutine (fakeAPI.inProcess): the bubble's clock is fake, so the holds take no real time
+// and the client reads the time exactly, the same on every platform. On a real clock, the time
+// left just after a 2-second wait timeout starts reads 1.99... s on Linux but often exactly 2 s
+// on Windows, whose clock moves in steps.
+
 func TestLongPollsThatTakeTheirTimeNeedNoPause(t *testing.T) {
+	// Each status request asks the API to hold it for up to 25 s; an answer that comes back
+	// within less than half of that is early, and the next request waits a growing pause first.
+	for _, tc := range []struct {
+		name   string
+		hold   time.Duration
+		pauses []time.Duration
+	}{
+		{"held for half of the time asked", 12500 * time.Millisecond, nil},
+		{"held for less than half", 12499 * time.Millisecond, []time.Duration{time.Second, 2 * time.Second}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Outside the bubble: the fake's own server waits on the network.
+			api := newFakeAPI(t)
+			api.statuses = []string{"processing", "processing", "processing", "done"}
+			api.holdWaits = tc.hold
+			var id string
+			synctest.Test(t, func(t *testing.T) {
+				client, pauses := api.client(t, converterstudio.WithHTTPClient(api.inProcess()))
+				created, err := client.ConvertURL(ctx, "https://example.com/a.heic", "jpg", &converterstudio.ConvertParams{NoWait: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				id = created.ID
+				if _, err := client.Wait(ctx, id); err != nil {
+					t.Fatal(err)
+				}
+				if !slices.Equal(*pauses, tc.pauses) {
+					t.Fatalf("pauses %v, want %v", *pauses, tc.pauses)
+				}
+			})
+			gets := api.of("GET", "/api/v1/conversions/"+id)
+			if len(gets) != 4 {
+				t.Fatalf("%d status requests", len(gets))
+			}
+			for _, get := range gets[1:] {
+				if get.Query.Get("wait") != "25" {
+					t.Fatalf("a long poll of %q s", get.Query.Get("wait"))
+				}
+			}
+		})
+	}
+}
+
+func TestALongPollAsksForTheWholeSecondsLeft(t *testing.T) {
 	api := newFakeAPI(t)
 	api.statuses = []string{"processing", "processing", "done"}
-	api.holdWaits = 600 * time.Millisecond
-	// With 2 seconds left, each status request may be held for 1 second; held 0.6 s, it is
-	// not early.
-	client, pauses := api.client(t, converterstudio.WithWaitTimeout(2*time.Second))
-	created, _ := client.ConvertURL(ctx, "https://example.com/a.heic", "jpg", &converterstudio.ConvertParams{NoWait: true})
-	if _, err := client.Wait(ctx, created.ID); err != nil {
-		t.Fatal(err)
-	}
-	if len(*pauses) != 0 {
-		t.Fatalf("pauses %v", *pauses)
+	api.holdWaits = time.Second
+	var id string
+	synctest.Test(t, func(t *testing.T) {
+		client, pauses := api.client(t, converterstudio.WithHTTPClient(api.inProcess()),
+			converterstudio.WithWaitTimeout(2500*time.Millisecond))
+		created, err := client.ConvertURL(ctx, "https://example.com/a.heic", "jpg", &converterstudio.ConvertParams{NoWait: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = created.ID
+		if _, err := client.Wait(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		// Held 1 s of 2, then 1 s of 1: neither answer is early.
+		if len(*pauses) != 0 {
+			t.Fatalf("pauses %v", *pauses)
+		}
+	})
+	// 2.5 s left: the API may hold the request for 2 s; then, 1.5 s left, for 1 s.
+	gets := api.of("GET", "/api/v1/conversions/"+id)
+	if len(gets) != 3 || gets[1].Query.Get("wait") != "2" || gets[2].Query.Get("wait") != "1" {
+		t.Fatalf("status requests %v", gets)
 	}
 }

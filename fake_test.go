@@ -118,6 +118,29 @@ func (f *fakeAPI) client(t testing.TB, opts ...converterstudio.Option) (*convert
 	return c, pauses
 }
 
+// inProcess is an HTTP client that hands each request straight to the fake's handler, in the
+// caller's goroutine, with no network in between. It is for tests in a synctest bubble: their
+// clock is fake and moves only while every goroutine of the bubble is blocked, and one waiting
+// on the network never counts as blocked.
+func (f *fakeAPI) inProcess() *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if err := r.Context().Err(); err != nil {
+			return nil, err
+		}
+		in := r.Clone(r.Context())
+		if in.Body == nil {
+			in.Body = http.NoBody
+		}
+		answer := httptest.NewRecorder()
+		f.handle(answer, in)
+		return answer.Result(), nil
+	})}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (rt roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return rt(r) }
+
 // push queues answers for a path ("/api/v1/conversions"), given before the usual ones.
 func (f *fakeAPI) push(path string, answers ...answer) {
 	f.mu.Lock()
