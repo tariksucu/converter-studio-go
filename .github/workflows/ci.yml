@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**.md'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+
+# Cancel in-progress runs for the same branch/PR.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Format, vet and staticcheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27'
+          cache-dependency-path: 'go.mod'
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Not formatted with gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go.mod is tidy
+        run: 'go mod tidy -diff'
+
+      - name: go vet
+        run: 'go vet ./...'
+
+      - name: Staticcheck
+        run: 'go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...'
+
+  test:
+    name: Tests (Go ${{ matrix.go-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The Go releases supported today: the two newest.
+        os: [ubuntu-latest]
+        go-version: ['1.26', '1.27']
+        include:
+          - os: windows-latest
+            go-version: '1.27'
+          - os: macos-latest
+            go-version: '1.27'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: 'go.mod'
+
+      # Unit tests and the runnable examples against a fake API: no network, no API key.
+      - name: Run tests (race detector)
+        if: matrix.os != 'windows-latest'
+        run: 'go test -race -count=1 -coverprofile=coverage.out ./...'
+
+      - name: Run tests
+        if: matrix.os == 'windows-latest'
+        run: 'go test -count=1 ./...'
